@@ -219,9 +219,6 @@ struct AppConfig {
     // File input is either paced to the WAV duration or consumed as quickly
     // as downstream processing permits.
     std::string file_input_mode = "realtime";  // "realtime" or "batch".
-    // Demo-only: while this file exists, realtime file pacing is paused.
-    // Empty disables the check (no filesystem access in the hot loop).
-    std::string pause_marker;
     std::string apm_binary = "./run-alsa-apm";
     std::string log_level = "info";
     bool playback_enabled = true;

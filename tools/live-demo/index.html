@@ -16,8 +16,7 @@ h1 .sub{font-size:12.5px;color:var(--muted);font-weight:500;background:#fff;bord
 .btn:hover:not(:disabled){filter:brightness(.93)}
 .btn:disabled{background:#c8cfd9 !important;cursor:not-allowed;box-shadow:none}
 #startBtn{background:linear-gradient(180deg,#22b455,#16a34a)}
-#stopBtn{background:linear-gradient(180deg,#f59e0b,#d97706)}
-#stopBtn.paused{background:linear-gradient(180deg,#22b455,#16a34a)}
+#stopBtn{background:linear-gradient(180deg,#e04444,#dc2626)}
 #upBtn{background:linear-gradient(180deg,#fff,#f1f5f9);color:#334155;box-shadow:inset 0 0 0 1px var(--border);padding:8px 14px}
 .sep{width:1px;height:26px;background:var(--border);margin:0 2px}
 label{font-size:13.5px;color:var(--muted)}
@@ -36,7 +35,7 @@ select:focus{outline:2px solid #bfdbfe;border-color:var(--accent)}
 .pitem{display:flex;flex-direction:column;gap:4px}
 .pitem select{width:100%}
 #stats{display:none}
-canvas{width:100%;height:260px;background:#fff;border:1px solid var(--border);border-radius:12px;margin-top:12px;box-shadow:0 1px 3px rgba(16,24,40,.05)}
+canvas{width:100%;height:200px;background:#fff;border:1px solid var(--border);border-radius:12px;margin-top:12px;box-shadow:0 1px 3px rgba(16,24,40,.05)}
 #feed{height:460px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 3px rgba(16,24,40,.05);padding:12px 16px;font-size:14.5px;line-height:1.6;margin-top:12px}
 .ln{margin:3px 0}.tm{color:var(--muted);font-size:12.5px}
 .ssolid{color:#2a3346}.stail{color:#c2c9d4}
@@ -48,7 +47,7 @@ canvas{width:100%;height:260px;background:#fff;border:1px solid var(--border);bo
 <div id="controls" class="card">
   <div id="bar">
     <button id="startBtn" class="btn">▶ 开始</button>
-    <button id="stopBtn" class="btn" disabled>⏸ 暂停</button>
+    <button id="stopBtn" class="btn">■ 停止</button>
     <div class="sep"></div>
     <label for="input">音频</label>
     <select id="input"><option value="60">2P 前 60s</option><option value="full" selected>2P 全片 33 分钟</option></select>
@@ -85,26 +84,21 @@ canvas{width:100%;height:260px;background:#fff;border:1px solid var(--border);bo
   <span>说话人+文字平均延迟 <b id="sAvg">-</b></span>
   <span>首个实时文字 <b id="sStext">-</b></span>
 </div>
-<canvas id="cv" width="1400" height="260" aria-label="时间轴：参考标注、说话人输出、文字、波形；红线为当前时刻"></canvas>
+<canvas id="cv" width="1400" height="200" aria-label="时间轴：说话人输出、文字、波形；红线为当前时刻"></canvas>
 <div id="feed" aria-label="实时转写：文字先行显示，权威稿到达后原地对账（说话人+时间+文字）"></div>
 <audio id="au" preload="auto"></audio>
 <script>
 const $ = id => document.getElementById(id);
 const au = $('au'), cv = $('cv'), ctx = cv.getContext('2d');
 const PAL = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b'];
-const REFPAL = ['#9ecae1','#fdae6b','#a1d99b','#fc9272'];
 let S = null, es = null, raf = 0, auURL = null;
-// Last uploaded custom audio: keep the exact bytes so starting the run does
-// not re-download them from the server.
-let upKey = null, upBuf = null;
 function reset(){
   S = {t0:null, frozen:null, diar:[], cov:0, prev:[], fin:[], ref:[], peaks:null, pps:50,
        spk:{}, rspk:{}, firstPrev:null, firstFin:null, firstStext:null, st:null, rows:[], lats:[],
-       running:false, paused:false, pendingPlay:false};
+       running:false, pendingPlay:false};
   au.removeAttribute('src');   // a stale blob must never replay for the next run
   au.load();
   au.pause();
-  syncPauseBtn();
   const el = $('feed');
   if (el._typing) { clearTimeout(el._typing.timer); el._typing = null; }
   el._lastArrive = null; el._estGap = null;
@@ -313,20 +307,10 @@ function onSfinal(ev){
   S.prev.push({ b: ev.b, e: ev.e });   // epoch bar on the timeline text row
   feedStick();
 }
-function syncPauseBtn(){
-  const b = $('stopBtn');
-  b.textContent = S && S.paused ? '▶ 继续' : '⏸ 暂停';
-  b.classList.toggle('paused', !!(S && S.paused));
-}
 function onEvent(ev){
   if (ev.ev === 'status') { S.running = ev.running;
     $('startBtn').disabled = ev.running;
-    $('stopBtn').disabled = !ev.running;
-    S.paused = !!ev.paused && ev.running;
-    syncPauseBtn();
-    $('status').textContent = !ev.running ? (S.t0 === null ? '空闲' : '已结束')
-      : S.paused ? '已暂停'
-      : (S.t0 === null ? '加载模型中… ' + ev.since + 's' : '运行中');
+    $('status').textContent = ev.running ? (S.t0 === null ? '加载模型中… ' + ev.since + 's' : '运行中') : (S.t0 === null ? '空闲' : '已结束');
     if (!ev.running && S.t0 !== null && S.frozen === null) { au.pause(); S.frozen = now(); }
     return; }
   if (ev.ev === 'start') { S.t0 = performance.now(); au.currentTime = 0; au.muted = $('mute').checked;
@@ -355,20 +339,18 @@ function draw(){
   const W = cv.width, H = cv.height, n = now(), L = 90, PW = W - L;
   const x1 = n + SPAN * 0.15, x0 = x1 - SPAN, X = t => L + (t - x0) / SPAN * PW;
   ctx.clearRect(0, 0, W, H); ctx.font = '13px sans-serif';
-  const rows = [['参考标注', 10], ['说话人输出', 70], ['文字', 130], ['波形', 190]];
+  const rows = [['说话人输出', 10], ['文字', 70], ['波形', 130]];
   rows.forEach(([name, y]) => { ctx.fillStyle = '#444'; ctx.fillText(name, 6, y + 28); ctx.fillStyle = '#f3f3f3'; ctx.fillRect(L, y, PW, 50); });
   const bar = (b, e, y, h, c) => { const a = Math.max(X(b), L), z = Math.min(X(e), W); if (z > a) { ctx.fillStyle = c; ctx.fillRect(a, y, z - a, h); } };
-  // reference: only what has already been heard
-  for (const r of S.ref) if (r[0] < n) bar(r[0], Math.min(r[1], n), 15, 40, color(S.rspk, REFPAL, r[2]));
-  for (const d of S.diar) bar(d.b, d.e, 75, 40, color(S.spk, PAL, d.spk));
+  for (const d of S.diar) bar(d.b, d.e, 15, 40, color(S.spk, PAL, d.spk));
   // unlabeled gap between the coverage frontier and now
-  if (n > S.cov) { ctx.fillStyle = 'rgba(0,0,0,0.08)'; const a = Math.max(X(S.cov), L); ctx.fillRect(a, 70, X(n) - a, 50);
-    ctx.fillStyle = '#999'; ctx.fillText('待标注', Math.max(a + 4, L + 4), 100); }
-  for (const p of S.prev) bar(p.b, p.e, 155, 18, 'rgba(120,120,120,0.35)');
-  for (const f of S.fin) bar(f.b, f.e, 135, 18, f.spk ? color(S.spk, PAL, f.spk) : '#666');
+  if (n > S.cov) { ctx.fillStyle = 'rgba(0,0,0,0.08)'; const a = Math.max(X(S.cov), L); ctx.fillRect(a, 10, X(n) - a, 50);
+    ctx.fillStyle = '#999'; ctx.fillText('待标注', Math.max(a + 4, L + 4), 40); }
+  for (const p of S.prev) bar(p.b, p.e, 95, 18, 'rgba(120,120,120,0.35)');
+  for (const f of S.fin) bar(f.b, f.e, 75, 18, f.spk ? color(S.spk, PAL, f.spk) : '#666');
   if (S.peaks) { ctx.fillStyle = '#7a8ca3'; const i0 = Math.max(0, Math.floor(x0 * S.pps)), i1 = Math.min(S.peaks.length, Math.floor(n * S.pps));
-    for (let i = i0; i < i1; i++) { const h = S.peaks[i] * 48; ctx.fillRect(X(i / S.pps), 215 - h / 2, Math.max(1, PW / SPAN / S.pps), h); } }
-  ctx.strokeStyle = '#3367d6'; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(X(S.cov), 64); ctx.lineTo(X(S.cov), 124); ctx.stroke(); ctx.setLineDash([]);
+    for (let i = i0; i < i1; i++) { const h = S.peaks[i] * 48; ctx.fillRect(X(i / S.pps), 155 - h / 2, Math.max(1, PW / SPAN / S.pps), h); } }
+  ctx.strokeStyle = '#3367d6'; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(X(S.cov), 4); ctx.lineTo(X(S.cov), 66); ctx.stroke(); ctx.setLineDash([]);
   ctx.strokeStyle = '#d00'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(X(n), 0); ctx.lineTo(X(n), H); ctx.stroke(); ctx.lineWidth = 1;
   ctx.fillStyle = '#666';
   for (let t = Math.ceil(x0 / 5) * 5; t < x1; t += 5) if (t >= 0) ctx.fillText(clock(t), X(t) - 14, H - 4);
@@ -421,7 +403,6 @@ $('upFile').onchange = async () => {
     if (!opt) { opt = document.createElement('option'); opt.value = j.key; $('input').appendChild(opt); }
     opt.textContent = j.label;
     $('input').value = j.key;
-    upKey = j.key; upBuf = wav;
     $('status').textContent = '已添加「' + j.label + '」，点「开始」运行';
   } catch (e) { console.warn(e); $('status').textContent = '无法解析该音频文件'; }
 };
@@ -435,10 +416,11 @@ $('startBtn').onclick = async () => {
   //    status shows while the audio is still being fetched below.
   const j = await startP;
   if (j.ok) connect();
-  // 3) fetch the audio ONCE (or reuse the bytes we just uploaded); reuse it
-  //    for playback (blob) and the waveform
-  let buf = (input === upKey && upBuf) ? upBuf : null;
-  if (!buf) { try { buf = await (await fetch('/audio?input=' + encodeURIComponent(input))).arrayBuffer(); } catch (e) { console.warn('audio', e); } }
+  // 3) fetch the audio ONCE; reuse it for playback (blob) and the waveform.
+  //    (Uploaded audio is always re-fetched: decodeAudioData detaches the
+  //    ArrayBuffer we sent to the server, so the cached copy is unusable.)
+  let buf = null;
+  try { buf = await (await fetch('/audio?input=' + encodeURIComponent(input))).arrayBuffer(); } catch (e) { console.warn('audio', e); }
   if (auURL) URL.revokeObjectURL(auURL);
   if (buf) {
     auURL = URL.createObjectURL(new Blob([buf], {type: 'audio/wav'}));
@@ -446,8 +428,6 @@ $('startBtn').onclick = async () => {
     // play()+pause() inside the click keeps autoplay permission for the delayed start
     au.muted = true; au.play().then(() => au.pause()).catch(() => {});
   }
-  // 4) reference labels + waveform peaks (from the buffer we already have)
-  try { S.ref = await (await fetch('/ref?input=' + encodeURIComponent(input) + '&limit=' + (input === '60' ? 60 : 1e9))).json(); } catch (e) { console.warn('ref', e); }
   loadWave(input, buf);
   $('status').textContent = j.msg;
   // if the pipeline's start event arrived while the audio was still loading,
@@ -455,21 +435,14 @@ $('startBtn').onclick = async () => {
   if (S.pendingPlay && S.t0 !== null && au.src) { S.pendingPlay = false; au.play().catch(()=>{}); }
 };
 $('stopBtn').onclick = () => {
-  if (S === null || !S.running) return;
-  if (!S.paused) {                    // -> pause: freeze audio + page clock, board holds pacing
-    S.paused = true; syncPauseBtn();
-    au.pause();
-    if (S.t0 !== null && S.frozen === null) S.frozen = now();
-    $('status').textContent = '已暂停';
-    fetch('/pause', {method: 'POST'}).catch(()=>{});
-  } else {                             // -> resume: shift the page clock by the pause duration
-    S.paused = false; syncPauseBtn();
-    fetch('/resume', {method: 'POST'}).catch(()=>{});
-    if (S.t0 !== null && S.frozen !== null) S.t0 = performance.now() - S.frozen * 1000;
-    S.frozen = null;
-    au.muted = $('mute').checked; au.play().catch(()=>{});
-    $('status').textContent = '运行中';
-  }
+  // Pause the browser-side "microphone" immediately; the board pipeline needs
+  // a few seconds to flush its final window, so /stop is fire-and-forget.
+  au.pause();
+  if (S.t0 !== null && S.frozen === null) S.frozen = now();
+  $('status').textContent = '停止中…';
+  fetch('/stop', {method: 'POST'}).then(r => r.json())
+    .then(j => { $('status').textContent = j.msg; })
+    .catch(() => { $('status').textContent = '停止请求失败'; });
 };
 $('mute').onchange = () => { au.muted = $('mute').checked; };
 // Streaming text replaces the pause-gated preview path: forcing preview off

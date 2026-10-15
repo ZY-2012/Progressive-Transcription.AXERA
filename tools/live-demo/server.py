@@ -45,8 +45,7 @@ PREVIEWS = ["0", "3", "2", "1"]
 TRAILS = ["1", "0.5"]
 TICKS = ["0", "0.8", "0.5", "1.2"]
 
-state = {"proc": None, "input": None, "launched": 0.0,
-         "paused": False, "marker": None}
+state = {"proc": None, "input": None, "launched": 0.0}
 lock = threading.Lock()
 
 
@@ -62,16 +61,12 @@ def inputs():
     return d
 
 
-def make_config(wav, step, maxseg, psplit, preview, trail, tick, pause_marker):
+def make_config(wav, step, maxseg, psplit, preview, trail, tick):
     text = open(TEMPLATE, encoding="utf-8").read()
     # The template stores all run products under the relative "output/" tree;
     # redirect every run into the dedicated WORK directory.
     text = text.replace("output/", WORK + "/")
     text = re.sub(r"input_wav: .*", "input_wav: %s" % wav, text)
-    # Pause marker: a board-local file (NOT on NFS -- attribute caching would
-    # delay visibility). While it exists, the APM child freezes file pacing.
-    text = re.sub(r"(?m)^runtime:",
-                  "runtime:\n  pause_marker: %s" % pause_marker, text, count=1)
     text = re.sub(r"session_step_sec: .*", "session_step_sec: %s" % step, text)
     text = re.sub(r"max_segment_seconds: .*", "max_segment_seconds: %s" % maxseg, text)
     text = re.sub(r"pause_split_seconds: .*", "pause_split_seconds: %s" % psplit, text)
@@ -126,39 +121,7 @@ def _stop_locked():
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGKILL)
             p.wait(timeout=5)
-    # Drop the pause marker of this run so a stale /tmp file can never freeze
-    # a future run (each run gets a fresh marker path, this is just hygiene).
-    marker = state.get("marker")
-    if marker:
-        try:
-            os.unlink(marker)
-        except OSError:
-            pass
-    state["paused"] = False
     return True
-
-
-def pause():
-    with lock:
-        if not running() or not state.get("marker"):
-            return False, "not running"
-        if not state["paused"]:
-            with open(state["marker"], "w"):
-                pass
-            state["paused"] = True
-        return True, "paused"
-
-
-def resume():
-    with lock:
-        marker = state.get("marker")
-        if marker:
-            try:
-                os.unlink(marker)
-            except OSError:
-                pass
-        state["paused"] = False
-        return True, "resumed"
 
 
 def _watchdog(proc):
@@ -179,12 +142,9 @@ def _watchdog(proc):
 def start(key, step, maxseg, psplit, preview, trail, tick):
     with lock:
         if running():
-            if events_ended() or state.get("paused"):
-                # Either winding down or paused: the user's click on 开始 is a
-                # clear intent to replace the current run, so stop it first.
-                _stop_locked()
-            else:
-                return False, "already running"
+            # Clicking 开始 is a clear intent to replace the current run:
+            # stop it (a few seconds of final-window flush) and start fresh.
+            _stop_locked()
         wav = inputs().get(key)
         if not wav or not os.path.isfile(wav):
             return False, "missing input %s" % wav
@@ -204,13 +164,9 @@ def start(key, step, maxseg, psplit, preview, trail, tick):
             except OSError:
                 subprocess.run(["rm", "-rf", WORK])
         os.makedirs(os.path.join(WORK, "mp3"), exist_ok=True)
-        # Unique per-run pause marker on the board's local /tmp.
-        marker = "/tmp/pt-demo-%d.pause" % int(time.time() * 1000)
-        cfg = make_config(wav, step, maxseg, psplit, preview, trail, tick, marker)
+        cfg = make_config(wav, step, maxseg, psplit, preview, trail, tick)
         log = open(LOG, "w")
         state["log"] = log
-        state["marker"] = marker
-        state["paused"] = False
         state["proc"] = subprocess.Popen(
             [os.path.join(REPO, "build/audio-pipeline"), "--config", cfg],
             cwd=REPO, env=env(), stdout=log, stderr=subprocess.STDOUT,
@@ -281,8 +237,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json(load_ref(float(q.get("limit", ["1e9"])[0])))
         elif u.path == "/status":
-            self.send_json({"running": running(), "input": state["input"],
-                            "paused": state.get("paused", False)})
+            self.send_json({"running": running(), "input": state["input"]})
         elif u.path == "/events":
             self.stream_events()
         else:
@@ -299,12 +254,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": ok, "msg": msg}, 200 if ok else 409)
         elif u.path == "/stop":
             ok, msg = stop()
-            self.send_json({"ok": ok, "msg": msg})
-        elif u.path == "/pause":
-            ok, msg = pause()
-            self.send_json({"ok": ok, "msg": msg}, 200 if ok else 409)
-        elif u.path == "/resume":
-            ok, msg = resume()
             self.send_json({"ok": ok, "msg": msg})
         elif u.path == "/upload":
             self.handle_upload(q)
@@ -412,7 +361,6 @@ class Handler(BaseHTTPRequestHandler):
                         if line:
                             self.wfile.write(b"data: " + line + b"\n\n")
                 status = {"ev": "status", "running": running(),
-                          "paused": state.get("paused", False),
                           "since": round(time.time() - launched, 1) if launched else 0}
                 self.wfile.write(("data: %s\n\n" % json.dumps(status)).encode())
                 self.wfile.flush()

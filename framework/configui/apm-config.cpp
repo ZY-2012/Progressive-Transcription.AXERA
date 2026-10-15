@@ -437,7 +437,6 @@ bool LoadAppConfig(const std::string& path,
       "output.temp_dir", "output.text_file", "output.mp3_dir",
       "output.max_mp3_storage_mb", "output.mp3_encoder",
       "runtime.input", "runtime.input_wav", "runtime.file_input_mode",
-      "runtime.pause_marker",
       "runtime.apm_binary", "runtime.npu_lock_file",
       "runtime.log_level", "runtime.playback_enabled"};
   for (const auto& item : v) {
@@ -550,7 +549,6 @@ bool LoadAppConfig(const std::string& path,
   GET_STRING("runtime.input", c->runtime.input);
   GET_OPTIONAL_STRING("runtime.input_wav", c->runtime.input_wav);
   GET_STRING("runtime.file_input_mode", c->runtime.file_input_mode);
-  GET_OPTIONAL_STRING("runtime.pause_marker", c->runtime.pause_marker);
   GET_STRING("runtime.apm_binary", c->runtime.apm_binary);
   GET_STRING("runtime.log_level", c->runtime.log_level);
   GET_BOOL("runtime.playback_enabled", c->runtime.playback_enabled);
@@ -587,8 +585,7 @@ bool LoadApmConfig(const std::string& path,
       "apm.gain_adjustment.pre_gain_factor",
       "apm.gain_adjustment.post_gain_factor",
       "apm.high_pass_filter_enabled", "runtime.input", "runtime.input_wav",
-      "runtime.file_input_mode", "runtime.pause_marker",
-      "runtime.playback_enabled"};
+      "runtime.file_input_mode", "runtime.playback_enabled"};
   for (const auto& item : v) {
     const bool apm_owned = item.first.rfind("audio.", 0) == 0 ||
                            item.first.rfind("buffers.", 0) == 0 ||
@@ -640,7 +637,6 @@ bool LoadApmConfig(const std::string& path,
   APM_GET_STRING("runtime.input", c->runtime.input);
   APM_GET_OPTIONAL_STRING("runtime.input_wav", c->runtime.input_wav);
   APM_GET_STRING("runtime.file_input_mode", c->runtime.file_input_mode);
-  APM_GET_OPTIONAL_STRING("runtime.pause_marker", c->runtime.pause_marker);
   APM_GET_BOOL("runtime.playback_enabled", c->runtime.playback_enabled);
 #undef APM_GET_STRING
 #undef APM_GET_OPTIONAL_STRING

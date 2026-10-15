@@ -14,7 +14,6 @@
 #include <numeric>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -493,16 +492,6 @@ class AlsaApmBackend::Impl {
   bool ProcessFileFrame(std::vector<int16_t>* apm_frame,
                         std::vector<int16_t>* processed_left,
                         std::chrono::steady_clock::time_point* next_deadline) {
-    // Optional pause marker (created by the demo server): while present, the
-    // realtime pacing clock is frozen.  On resume the deadline is re-anchored
-    // to *now* so the stream never fast-forwards to catch up.
-    if (!pause_marker_.empty()) {
-      while (running_.load() && access(pause_marker_.c_str(), F_OK) == 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      }
-      if (!running_.load()) return false;
-      *next_deadline = std::chrono::steady_clock::now();
-    }
     if (!ProcessCaptureFrame(apm_frame->data(), capture_channels_, 0,
                              processed_left)) {
       return false;
@@ -936,8 +925,6 @@ class AlsaApmBackend::Impl {
   std::ifstream file_input_;
   uint32_t file_sample_rate_hz_ = 0;
   uint64_t file_bytes_remaining_ = 0;
-  // Demo server drops this file to pause file playback pacing.
-  std::string pause_marker_ = config_.runtime.pause_marker;
   rtc::scoped_refptr<webrtc::AudioProcessing> apm_;
   std::thread playback_thread_;
   std::thread capture_thread_;
