@@ -16,7 +16,9 @@ h1 .sub{font-size:12.5px;color:var(--muted);font-weight:500;background:#fff;bord
 .btn:hover:not(:disabled){filter:brightness(.93)}
 .btn:disabled{background:#c8cfd9 !important;cursor:not-allowed;box-shadow:none}
 #startBtn{background:linear-gradient(180deg,#22b455,#16a34a)}
-#stopBtn{background:linear-gradient(180deg,#e04444,#dc2626)}
+#stopBtn{background:linear-gradient(180deg,#f59e0b,#d97706)}
+#stopBtn.paused{background:linear-gradient(180deg,#22b455,#16a34a)}
+#upBtn{background:linear-gradient(180deg,#fff,#f1f5f9);color:#334155;box-shadow:inset 0 0 0 1px var(--border);padding:8px 14px}
 .sep{width:1px;height:26px;background:var(--border);margin:0 2px}
 label{font-size:13.5px;color:var(--muted)}
 select{font-size:13.5px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--ink)}
@@ -46,10 +48,12 @@ canvas{width:100%;height:260px;background:#fff;border:1px solid var(--border);bo
 <div id="controls" class="card">
   <div id="bar">
     <button id="startBtn" class="btn">▶ 开始</button>
-    <button id="stopBtn" class="btn">■ 停止</button>
+    <button id="stopBtn" class="btn" disabled>⏸ 暂停</button>
     <div class="sep"></div>
     <label for="input">音频</label>
     <select id="input"><option value="60">2P 前 60s</option><option value="full" selected>2P 全片 33 分钟</option></select>
+    <button id="upBtn" class="btn" title="上传任意格式音频，浏览器自动转成 16k 单声道 WAV">＋ 上传音频</button>
+    <input type="file" id="upFile" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.aac" hidden>
     <label class="chk"><input type="checkbox" id="mute"> 静音</label>
     <span id="status" role="status" aria-live="polite">空闲</span>
   </div>
@@ -90,9 +94,17 @@ const au = $('au'), cv = $('cv'), ctx = cv.getContext('2d');
 const PAL = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b'];
 const REFPAL = ['#9ecae1','#fdae6b','#a1d99b','#fc9272'];
 let S = null, es = null, raf = 0, auURL = null;
+// Last uploaded custom audio: keep the exact bytes so starting the run does
+// not re-download them from the server.
+let upKey = null, upBuf = null;
 function reset(){
   S = {t0:null, frozen:null, diar:[], cov:0, prev:[], fin:[], ref:[], peaks:null, pps:50,
-       spk:{}, rspk:{}, firstPrev:null, firstFin:null, firstStext:null, st:null, rows:[], lats:[], running:false};
+       spk:{}, rspk:{}, firstPrev:null, firstFin:null, firstStext:null, st:null, rows:[], lats:[],
+       running:false, paused:false, pendingPlay:false};
+  au.removeAttribute('src');   // a stale blob must never replay for the next run
+  au.load();
+  au.pause();
+  syncPauseBtn();
   const el = $('feed');
   if (el._typing) { clearTimeout(el._typing.timer); el._typing = null; }
   el._lastArrive = null; el._estGap = null;
@@ -301,13 +313,25 @@ function onSfinal(ev){
   S.prev.push({ b: ev.b, e: ev.e });   // epoch bar on the timeline text row
   feedStick();
 }
+function syncPauseBtn(){
+  const b = $('stopBtn');
+  b.textContent = S && S.paused ? '▶ 继续' : '⏸ 暂停';
+  b.classList.toggle('paused', !!(S && S.paused));
+}
 function onEvent(ev){
   if (ev.ev === 'status') { S.running = ev.running;
     $('startBtn').disabled = ev.running;
-    $('status').textContent = ev.running ? (S.t0 === null ? '加载模型中… ' + ev.since + 's' : '运行中') : (S.t0 === null ? '空闲' : '已结束');
+    $('stopBtn').disabled = !ev.running;
+    S.paused = !!ev.paused && ev.running;
+    syncPauseBtn();
+    $('status').textContent = !ev.running ? (S.t0 === null ? '空闲' : '已结束')
+      : S.paused ? '已暂停'
+      : (S.t0 === null ? '加载模型中… ' + ev.since + 's' : '运行中');
     if (!ev.running && S.t0 !== null && S.frozen === null) { au.pause(); S.frozen = now(); }
     return; }
-  if (ev.ev === 'start') { S.t0 = performance.now(); au.currentTime = 0; au.muted = $('mute').checked; au.play().catch(()=>{}); return; }
+  if (ev.ev === 'start') { S.t0 = performance.now(); au.currentTime = 0; au.muted = $('mute').checked;
+    if (au.src) au.play().catch(()=>{}); else S.pendingPlay = true;   // audio still buffering
+    return; }
   if (S.t0 === null) return;
   // SSE is polled every 0.1 s: never let the page clock lag the board clock.
   if (S.frozen === null && ev.t > now()) S.t0 = performance.now() - ev.t * 1000;
@@ -360,14 +384,61 @@ function connect(){
   es = new EventSource('/events');
   es.onmessage = m => { try { onEvent(JSON.parse(m.data)); } catch (e) { console.warn(e); } };
 }
+// Encode a Float32 channel as a 16-bit PCM mono WAV file.
+function encodeWav(samples, rate){
+  const n = samples.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return buf;
+}
+$('upBtn').onclick = () => $('upFile').click();
+$('upFile').onchange = async () => {
+  const f = $('upFile').files[0];
+  $('upFile').value = '';
+  if (!f) return;
+  $('status').textContent = '解码 ' + f.name + ' …';
+  try {
+    const decoded = await new (window.AudioContext || window.webkitAudioContext)()
+      .decodeAudioData(await f.arrayBuffer());
+    const rate = 16000, len = Math.max(1, Math.ceil(decoded.duration * rate));
+    const oc = new OfflineAudioContext(1, len, rate);   // decodes any input to 16k mono
+    const src = oc.createBufferSource(); src.buffer = decoded; src.connect(oc.destination); src.start();
+    const wav = encodeWav((await oc.startRendering()).getChannelData(0), rate);
+    const label = f.name.replace(/\.[^.]*$/, '') || 'audio';
+    $('status').textContent = '上传中（' + (wav.byteLength / 1048576).toFixed(1) + ' MB）…';
+    const r = await fetch('/upload?name=' + encodeURIComponent(label + '.wav'), {method: 'POST', body: wav});
+    const j = await r.json();
+    if (!j.ok) { $('status').textContent = j.msg; return; }
+    let opt = null;
+    for (const o of $('input').options) if (o.value === j.key) opt = o;
+    if (!opt) { opt = document.createElement('option'); opt.value = j.key; $('input').appendChild(opt); }
+    opt.textContent = j.label;
+    $('input').value = j.key;
+    upKey = j.key; upBuf = wav;
+    $('status').textContent = '已添加「' + j.label + '」，点「开始」运行';
+  } catch (e) { console.warn(e); $('status').textContent = '无法解析该音频文件'; }
+};
 $('startBtn').onclick = async () => {
   const input = $('input').value; reset();
-  // 1) tell the board to start FIRST: model loading begins while we fetch audio
-  const startP = fetch('/start?input=' + input + '&step=' + $('step').value + '&maxseg=' + $('maxseg').value + '&psplit=' + $('psplit').value + '&preview=' + $('preview').value + '&trail=' + $('trail').value + '&tick=' + $('tick').value, {method: 'POST'})
+  $('status').textContent = '启动中…';
+  // 1) tell the board to start FIRST: model loading begins immediately
+  const startP = fetch('/start?input=' + encodeURIComponent(input) + '&step=' + $('step').value + '&maxseg=' + $('maxseg').value + '&psplit=' + $('psplit').value + '&preview=' + $('preview').value + '&trail=' + $('trail').value + '&tick=' + $('tick').value, {method: 'POST'})
     .then(r => r.json()).catch(() => ({ok: false, msg: '启动请求失败'}));
-  // 2) fetch the audio ONCE; reuse it for playback (blob) and the waveform
-  let buf = null;
-  try { buf = await (await fetch('/audio?input=' + input)).arrayBuffer(); } catch (e) { console.warn('audio', e); }
+  // 2) once /start confirms, attach SSE right away: the「加载模型中… X s」
+  //    status shows while the audio is still being fetched below.
+  const j = await startP;
+  if (j.ok) connect();
+  // 3) fetch the audio ONCE (or reuse the bytes we just uploaded); reuse it
+  //    for playback (blob) and the waveform
+  let buf = (input === upKey && upBuf) ? upBuf : null;
+  if (!buf) { try { buf = await (await fetch('/audio?input=' + encodeURIComponent(input))).arrayBuffer(); } catch (e) { console.warn('audio', e); } }
   if (auURL) URL.revokeObjectURL(auURL);
   if (buf) {
     auURL = URL.createObjectURL(new Blob([buf], {type: 'audio/wav'}));
@@ -375,22 +446,30 @@ $('startBtn').onclick = async () => {
     // play()+pause() inside the click keeps autoplay permission for the delayed start
     au.muted = true; au.play().then(() => au.pause()).catch(() => {});
   }
-  // 3) reference labels + waveform peaks (from the buffer we already have)
-  S.ref = await (await fetch('/ref?limit=' + (input === '60' ? 60 : 1e9))).json();
+  // 4) reference labels + waveform peaks (from the buffer we already have)
+  try { S.ref = await (await fetch('/ref?input=' + encodeURIComponent(input) + '&limit=' + (input === '60' ? 60 : 1e9))).json(); } catch (e) { console.warn('ref', e); }
   loadWave(input, buf);
-  const j = await startP;
   $('status').textContent = j.msg;
-  if (j.ok) connect();
+  // if the pipeline's start event arrived while the audio was still loading,
+  // begin playback now
+  if (S.pendingPlay && S.t0 !== null && au.src) { S.pendingPlay = false; au.play().catch(()=>{}); }
 };
 $('stopBtn').onclick = () => {
-  // Pause the browser-side "microphone" immediately; the board pipeline needs
-  // a few seconds to flush its final window, so /stop is fire-and-forget.
-  au.pause();
-  if (S.t0 !== null && S.frozen === null) S.frozen = now();
-  $('status').textContent = '停止中…';
-  fetch('/stop', {method: 'POST'}).then(r => r.json())
-    .then(j => { $('status').textContent = j.msg; })
-    .catch(() => { $('status').textContent = '停止请求失败'; });
+  if (S === null || !S.running) return;
+  if (!S.paused) {                    // -> pause: freeze audio + page clock, board holds pacing
+    S.paused = true; syncPauseBtn();
+    au.pause();
+    if (S.t0 !== null && S.frozen === null) S.frozen = now();
+    $('status').textContent = '已暂停';
+    fetch('/pause', {method: 'POST'}).catch(()=>{});
+  } else {                             // -> resume: shift the page clock by the pause duration
+    S.paused = false; syncPauseBtn();
+    fetch('/resume', {method: 'POST'}).catch(()=>{});
+    if (S.t0 !== null && S.frozen !== null) S.t0 = performance.now() - S.frozen * 1000;
+    S.frozen = null;
+    au.muted = $('mute').checked; au.play().catch(()=>{});
+    $('status').textContent = '运行中';
+  }
 };
 $('mute').onchange = () => { au.muted = $('mute').checked; };
 // Streaming text replaces the pause-gated preview path: forcing preview off

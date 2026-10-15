@@ -33,6 +33,10 @@ INPUTS = {
     # optional longer meeting; drop any 16k mono WAV here to enable "full"
     "full": os.path.join(REPO, "samples/2P_meeting_full.wav"),
 }
+# Browser-uploaded custom audio lands here (16 kHz mono WAV, transcoded in
+# the browser so the board only ever receives clean PCM WAV).
+UPLOAD_DIR = os.path.join(REPO, "uploads")
+UPLOAD_LIMIT = 300 * 1024 * 1024
 REF_RTTM = os.path.join(REPO, "samples/reference.rttm")
 STEPS = ["10", "2", "1"]
 MAXSEGS = ["10", "5"]
@@ -41,16 +45,33 @@ PREVIEWS = ["0", "3", "2", "1"]
 TRAILS = ["1", "0.5"]
 TICKS = ["0", "0.8", "0.5", "1.2"]
 
-state = {"proc": None, "input": None, "launched": 0.0}
+state = {"proc": None, "input": None, "launched": 0.0,
+         "paused": False, "marker": None}
 lock = threading.Lock()
 
 
-def make_config(wav, step, maxseg, psplit, preview, trail, tick):
+def inputs():
+    """Built-in samples plus every uploaded WAV ("up:<filename>" keys)."""
+    d = dict(INPUTS)
+    try:
+        for name in sorted(os.listdir(UPLOAD_DIR)):
+            if name.lower().endswith(".wav"):
+                d["up:" + name] = os.path.join(UPLOAD_DIR, name)
+    except OSError:
+        pass
+    return d
+
+
+def make_config(wav, step, maxseg, psplit, preview, trail, tick, pause_marker):
     text = open(TEMPLATE, encoding="utf-8").read()
     # The template stores all run products under the relative "output/" tree;
     # redirect every run into the dedicated WORK directory.
     text = text.replace("output/", WORK + "/")
     text = re.sub(r"input_wav: .*", "input_wav: %s" % wav, text)
+    # Pause marker: a board-local file (NOT on NFS -- attribute caching would
+    # delay visibility). While it exists, the APM child freezes file pacing.
+    text = re.sub(r"(?m)^runtime:",
+                  "runtime:\n  pause_marker: %s" % pause_marker, text, count=1)
     text = re.sub(r"session_step_sec: .*", "session_step_sec: %s" % step, text)
     text = re.sub(r"max_segment_seconds: .*", "max_segment_seconds: %s" % maxseg, text)
     text = re.sub(r"pause_split_seconds: .*", "pause_split_seconds: %s" % psplit, text)
@@ -105,7 +126,39 @@ def _stop_locked():
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGKILL)
             p.wait(timeout=5)
+    # Drop the pause marker of this run so a stale /tmp file can never freeze
+    # a future run (each run gets a fresh marker path, this is just hygiene).
+    marker = state.get("marker")
+    if marker:
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+    state["paused"] = False
     return True
+
+
+def pause():
+    with lock:
+        if not running() or not state.get("marker"):
+            return False, "not running"
+        if not state["paused"]:
+            with open(state["marker"], "w"):
+                pass
+            state["paused"] = True
+        return True, "paused"
+
+
+def resume():
+    with lock:
+        marker = state.get("marker")
+        if marker:
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+        state["paused"] = False
+        return True, "resumed"
 
 
 def _watchdog(proc):
@@ -126,11 +179,13 @@ def _watchdog(proc):
 def start(key, step, maxseg, psplit, preview, trail, tick):
     with lock:
         if running():
-            if events_ended():
-                _stop_locked()  # previous run already ended; just winding down
+            if events_ended() or state.get("paused"):
+                # Either winding down or paused: the user's click on 开始 is a
+                # clear intent to replace the current run, so stop it first.
+                _stop_locked()
             else:
                 return False, "already running"
-        wav = INPUTS.get(key)
+        wav = inputs().get(key)
         if not wav or not os.path.isfile(wav):
             return False, "missing input %s" % wav
         if step not in STEPS or maxseg not in MAXSEGS or psplit not in PSPLITS or preview not in PREVIEWS or trail not in TRAILS:
@@ -149,9 +204,13 @@ def start(key, step, maxseg, psplit, preview, trail, tick):
             except OSError:
                 subprocess.run(["rm", "-rf", WORK])
         os.makedirs(os.path.join(WORK, "mp3"), exist_ok=True)
-        cfg = make_config(wav, step, maxseg, psplit, preview, trail, tick)
+        # Unique per-run pause marker on the board's local /tmp.
+        marker = "/tmp/pt-demo-%d.pause" % int(time.time() * 1000)
+        cfg = make_config(wav, step, maxseg, psplit, preview, trail, tick, marker)
         log = open(LOG, "w")
         state["log"] = log
+        state["marker"] = marker
+        state["paused"] = False
         state["proc"] = subprocess.Popen(
             [os.path.join(REPO, "build/audio-pipeline"), "--config", cfg],
             cwd=REPO, env=env(), stdout=log, stderr=subprocess.STDOUT,
@@ -206,11 +265,24 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         elif u.path == "/audio":
-            self.serve_file(INPUTS.get(q.get("input", ["60"])[0]), "audio/wav")
+            self.serve_file(inputs().get(q.get("input", ["60"])[0]), "audio/wav")
+        elif u.path == "/inputs":
+            items = []
+            for key, path in inputs().items():
+                label = os.path.basename(path)
+                if label.lower().endswith(".wav"):
+                    label = label[:-4]
+                items.append({"key": key, "label": label})
+            self.send_json(items)
         elif u.path == "/ref":
-            self.send_json(load_ref(float(q.get("limit", ["1e9"])[0])))
+            key = q.get("input", ["60"])[0]
+            if key.startswith("up:"):
+                self.send_json([])  # no reference labels for custom audio
+            else:
+                self.send_json(load_ref(float(q.get("limit", ["1e9"])[0])))
         elif u.path == "/status":
-            self.send_json({"running": running(), "input": state["input"]})
+            self.send_json({"running": running(), "input": state["input"],
+                            "paused": state.get("paused", False)})
         elif u.path == "/events":
             self.stream_events()
         else:
@@ -228,8 +300,58 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/stop":
             ok, msg = stop()
             self.send_json({"ok": ok, "msg": msg})
+        elif u.path == "/pause":
+            ok, msg = pause()
+            self.send_json({"ok": ok, "msg": msg}, 200 if ok else 409)
+        elif u.path == "/resume":
+            ok, msg = resume()
+            self.send_json({"ok": ok, "msg": msg})
+        elif u.path == "/upload":
+            self.handle_upload(q)
         else:
             self.send_error(404)
+
+    def handle_upload(self, q):
+        name = (q.get("name", ["audio.wav"])[0]
+                .replace("\\", "/").split("/")[-1])
+        name = re.sub(r"[^A-Za-z0-9._ -]", "_", name).strip(" .") or "audio.wav"
+        if not name.lower().endswith(".wav"):
+            name += ".wav"
+        if len(name) > 100:
+            name = name[-100:]
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            size = 0
+        if size <= 44 or size > UPLOAD_LIMIT:
+            self.send_json({"ok": False, "msg": "文件大小超出限制（1MB–300MB）"}, 400)
+            self.rfile.read(min(size, 1 << 20))
+            return
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        tmp = os.path.join(UPLOAD_DIR, ".%d.tmp" % time.time())
+        try:
+            with open(tmp, "wb") as f:
+                left = size
+                while left > 0:
+                    chunk = self.rfile.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    left -= len(chunk)
+            head = open(tmp, "rb").read(12)
+            if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                raise ValueError("not a WAV file")
+            final = os.path.join(UPLOAD_DIR, name)
+            os.replace(tmp, final)
+        except Exception as e:  # noqa: BLE001 - report any failure to the page
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            self.send_json({"ok": False, "msg": "上传失败：%s" % e}, 400)
+            return
+        label = name[:-4] if name.lower().endswith(".wav") else name
+        self.send_json({"ok": True, "key": "up:" + name, "label": label})
 
     def serve_file(self, path, ctype):
         if not path or not os.path.isfile(path):
@@ -290,6 +412,7 @@ class Handler(BaseHTTPRequestHandler):
                         if line:
                             self.wfile.write(b"data: " + line + b"\n\n")
                 status = {"ev": "status", "running": running(),
+                          "paused": state.get("paused", False),
                           "since": round(time.time() - launched, 1) if launched else 0}
                 self.wfile.write(("data: %s\n\n" % json.dumps(status)).encode())
                 self.wfile.flush()

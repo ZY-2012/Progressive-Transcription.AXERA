@@ -16,5 +16,6 @@ models-for-asr-chain
 
 # local run workspace (live-demo)
 runs/
+uploads/
 output/
 toolchains/
