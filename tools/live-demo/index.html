@@ -89,7 +89,7 @@ const $ = id => document.getElementById(id);
 const au = $('au'), cv = $('cv'), ctx = cv.getContext('2d');
 const PAL = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b'];
 const REFPAL = ['#9ecae1','#fdae6b','#a1d99b','#fc9272'];
-let S = null, es = null, raf = 0;
+let S = null, es = null, raf = 0, auURL = null;
 function reset(){
   S = {t0:null, frozen:null, diar:[], cov:0, prev:[], fin:[], ref:[], peaks:null, pps:50,
        spk:{}, rspk:{}, firstPrev:null, firstFin:null, firstStext:null, st:null, rows:[], lats:[], running:false};
@@ -103,9 +103,9 @@ function now(){ if (!S || S.t0 === null) return 0;
   return S.frozen !== null ? S.frozen : (performance.now() - S.t0) / 1000; }
 function fmt(x){ return x === null || x === undefined ? '-' : x.toFixed(1) + 's'; }
 function clock(x){ const m = Math.floor(x / 60), s = x - m * 60; return m + ':' + s.toFixed(1).padStart(4, '0'); }
-async function loadWave(input){
+async function loadWave(input, buf){
   try {
-    const buf = await (await fetch('/audio?input=' + input)).arrayBuffer();
+    buf = buf || await (await fetch('/audio?input=' + input)).arrayBuffer();
     const ac = new (window.AudioContext || window.webkitAudioContext)();
     const ab = await ac.decodeAudioData(buf);
     const d = ab.getChannelData(0), step = Math.floor(ab.sampleRate / S.pps);
@@ -362,13 +362,24 @@ function connect(){
 }
 $('startBtn').onclick = async () => {
   const input = $('input').value; reset();
-  au.src = '/audio?input=' + input; au.load();
-  // play()+pause() inside the click keeps autoplay permission for the delayed start
-  au.muted = true; au.play().then(() => au.pause()).catch(() => {});
+  // 1) tell the board to start FIRST: model loading begins while we fetch audio
+  const startP = fetch('/start?input=' + input + '&step=' + $('step').value + '&maxseg=' + $('maxseg').value + '&psplit=' + $('psplit').value + '&preview=' + $('preview').value + '&trail=' + $('trail').value + '&tick=' + $('tick').value, {method: 'POST'})
+    .then(r => r.json()).catch(() => ({ok: false, msg: '启动请求失败'}));
+  // 2) fetch the audio ONCE; reuse it for playback (blob) and the waveform
+  let buf = null;
+  try { buf = await (await fetch('/audio?input=' + input)).arrayBuffer(); } catch (e) { console.warn('audio', e); }
+  if (auURL) URL.revokeObjectURL(auURL);
+  if (buf) {
+    auURL = URL.createObjectURL(new Blob([buf], {type: 'audio/wav'}));
+    au.src = auURL; au.load();
+    // play()+pause() inside the click keeps autoplay permission for the delayed start
+    au.muted = true; au.play().then(() => au.pause()).catch(() => {});
+  }
+  // 3) reference labels + waveform peaks (from the buffer we already have)
   S.ref = await (await fetch('/ref?limit=' + (input === '60' ? 60 : 1e9))).json();
-  loadWave(input);
-  const r = await fetch('/start?input=' + input + '&step=' + $('step').value + '&maxseg=' + $('maxseg').value + '&psplit=' + $('psplit').value + '&preview=' + $('preview').value + '&trail=' + $('trail').value + '&tick=' + $('tick').value, {method: 'POST'});
-  const j = await r.json(); $('status').textContent = j.msg;
+  loadWave(input, buf);
+  const j = await startP;
+  $('status').textContent = j.msg;
   if (j.ok) connect();
 };
 $('stopBtn').onclick = () => {

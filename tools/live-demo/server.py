@@ -12,6 +12,7 @@ Intended for a trusted lab LAN only.
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -82,10 +83,53 @@ def running():
     return p is not None and p.poll() is None
 
 
+def events_ended():
+    """True once the pipeline has emitted its 'end' event (writing to EVENTS)."""
+    try:
+        with open(EVENTS, "rb") as f:
+            f.seek(0, 2)
+            n = f.tell()
+            f.seek(max(0, n - 8192))
+            data = f.read()
+            return b'"ev":"end"' in data or b'"ev": "end"' in data
+    except OSError:
+        return False
+
+
+def _stop_locked():
+    p = state["proc"]
+    if p is not None and p.poll() is None:
+        os.killpg(p.pid, signal.SIGINT)
+        try:
+            p.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait(timeout=5)
+    return True
+
+
+def _watchdog(proc):
+    """SIGINT the pipeline ~10s after its 'end' event so the board frees the NPU
+    promptly instead of lingering in diar session wrap-up (~3 min)."""
+    ended_at = None
+    while proc.poll() is None:
+        time.sleep(1)
+        if ended_at is None and events_ended():
+            ended_at = time.time()
+        if ended_at is not None and time.time() - ended_at > 10:
+            with lock:
+                if state["proc"] is proc:  # do not touch a newer run
+                    _stop_locked()
+            return
+
+
 def start(key, step, maxseg, psplit, preview, trail, tick):
     with lock:
         if running():
-            return False, "already running"
+            if events_ended():
+                _stop_locked()  # previous run already ended; just winding down
+            else:
+                return False, "already running"
         wav = INPUTS.get(key)
         if not wav or not os.path.isfile(wav):
             return False, "missing input %s" % wav
@@ -93,14 +137,27 @@ def start(key, step, maxseg, psplit, preview, trail, tick):
             return False, "bad step/maxseg/psplit/preview/trail"
         if tick not in TICKS:
             return False, "bad tick"
-        subprocess.run(["rm", "-rf", WORK])
+        # Rotate the previous workspace out of the request path: renaming is a
+        # single fast op even on NFS, the actual deletion happens in background
+        # (rm -rf of ~1k files over NFS would stall /start for seconds).
+        if os.path.isdir(WORK):
+            old = "%s.old.%d" % (WORK, int(time.time() * 1000))
+            try:
+                os.rename(WORK, old)
+                threading.Thread(target=shutil.rmtree, args=(old, True),
+                                 daemon=True).start()
+            except OSError:
+                subprocess.run(["rm", "-rf", WORK])
         os.makedirs(os.path.join(WORK, "mp3"), exist_ok=True)
         cfg = make_config(wav, step, maxseg, psplit, preview, trail, tick)
         log = open(LOG, "w")
+        state["log"] = log
         state["proc"] = subprocess.Popen(
             [os.path.join(REPO, "build/audio-pipeline"), "--config", cfg],
             cwd=REPO, env=env(), stdout=log, stderr=subprocess.STDOUT,
             start_new_session=True)
+        threading.Thread(target=_watchdog, args=(state["proc"],),
+                         daemon=True).start()
         state["input"] = key
         state["launched"] = time.time()
         return True, "started"
@@ -108,13 +165,7 @@ def start(key, step, maxseg, psplit, preview, trail, tick):
 
 def stop():
     with lock:
-        p = state["proc"]
-        if p is not None and p.poll() is None:
-            os.killpg(p.pid, signal.SIGINT)
-            try:
-                p.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(p.pid, signal.SIGKILL)
+        _stop_locked()
         return True, "stopped"
 
 
@@ -220,20 +271,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         launched = state["launched"]
-        pos = 0
+        # Tail EVENTS through one stable fd: even if a later /start rotates the
+        # workspace (rename + background rmtree), we keep reading this inode.
+        # "a+b": creates the file if the pipeline has not flushed its first
+        # line yet; seek(0) replays the whole run for late-joining viewers.
+        evf = open(EVENTS, "a+b")
+        evf.seek(0)
+        buf = b""
         try:
             while True:
                 if state["launched"] != launched:
                     return  # new run: client reconnects
-                if os.path.isfile(EVENTS):
-                    with open(EVENTS, encoding="utf-8") as f:
-                        f.seek(pos)
-                        while True:
-                            line = f.readline()
-                            if not line or not line.endswith("\n"):
-                                break
-                            pos = f.tell()
-                            self.wfile.write(("data: %s\n\n" % line.strip()).encode())
+                chunk = evf.read(65536)
+                if chunk:
+                    parts = (buf + chunk).split(b"\n")
+                    buf = parts.pop()  # keep the trailing partial line
+                    for line in parts:
+                        if line:
+                            self.wfile.write(b"data: " + line + b"\n\n")
                 status = {"ev": "status", "running": running(),
                           "since": round(time.time() - launched, 1) if launched else 0}
                 self.wfile.write(("data: %s\n\n" % json.dumps(status)).encode())
