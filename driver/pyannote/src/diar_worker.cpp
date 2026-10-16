@@ -70,6 +70,7 @@ struct Options {
     bool incremental = false;
     bool incremental_plda = false;
     float incremental_delta_new = 0.5f;
+    float incremental_delta_min = 0.75f;
     float incremental_rho_update = 0.4f;
 };
 
@@ -179,6 +180,9 @@ Options ParseArgs(int argc, char** argv) {
         } else if (arg == "--delta-new") {
             options.incremental_delta_new =
                 ParseFloat(RequireValue(argc, argv, &i), "--delta-new");
+        } else if (arg == "--delta-min") {
+            options.incremental_delta_min =
+                ParseFloat(RequireValue(argc, argv, &i), "--delta-min");
         } else if (arg == "--rho-update") {
             options.incremental_rho_update =
                 ParseFloat(RequireValue(argc, argv, &i), "--rho-update");
@@ -215,6 +219,7 @@ DiarResult RunRequest(c1::DiarEngine* engine, diar::SpeakerTable* table,
     if (options.incremental) {
         inc.use_plda = options.incremental_plda;
         inc.delta_new = options.incremental_delta_new;
+        inc.delta_min = options.incremental_delta_min;
         inc.rho_update = options.incremental_rho_update;
         inc_ptr = &inc;
     }
@@ -366,9 +371,11 @@ int main(int argc, char** argv) {
         }
         if (options.incremental) {
             std::fprintf(stderr,
-                         "[diar] incremental clustering: %s delta_new=%.2f rho_update=%.2f\n",
+                         "[diar] incremental clustering: %s delta_new=%.2f delta_min=%.2f "
+                         "rho_update=%.2f\n",
                          options.incremental_plda ? "plda" : "raw",
                          options.incremental_delta_new,
+                         options.incremental_delta_min,
                          options.incremental_rho_update);
         }
 

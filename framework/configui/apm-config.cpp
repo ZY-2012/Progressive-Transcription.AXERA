@@ -284,6 +284,8 @@ bool ValidateAppConfig(const AppConfig& c, std::string* error) {
       c.diarization.online_max_speakers > 40 ||
       c.diarization.incremental_delta_new <= 0.0f ||
       c.diarization.incremental_delta_new > 2.0f ||
+      c.diarization.incremental_delta_min < 0.0f ||
+      c.diarization.incremental_delta_min > 2.0f ||
       c.diarization.incremental_rho_update <= 0.0f ||
       c.diarization.incremental_rho_update >= 1.0f ||
       c.diarization.runner.empty() || c.diarization.model_path.empty() ||
@@ -431,7 +433,8 @@ bool LoadAppConfig(const std::string& path,
       "diarization.online_update_min_sec",
       "diarization.online_max_speakers",
       "diarization.incremental", "diarization.incremental_plda",
-      "diarization.incremental_delta_new", "diarization.incremental_rho_update",
+      "diarization.incremental_delta_new", "diarization.incremental_delta_min",
+      "diarization.incremental_rho_update",
       "asr.enabled", "asr.model_path", "asr.model_type", "asr.language",
       "asr.library", "asr.npu_core", "asr.worker_threads",
       "output.temp_dir", "output.text_file", "output.mp3_dir",
@@ -532,6 +535,7 @@ bool LoadAppConfig(const std::string& path,
   GET_BOOL("diarization.incremental", c->diarization.incremental);
   GET_BOOL("diarization.incremental_plda", c->diarization.incremental_plda);
   GET_NUM("diarization.incremental_delta_new", c->diarization.incremental_delta_new);
+  GET_NUM("diarization.incremental_delta_min", c->diarization.incremental_delta_min);
   GET_NUM("diarization.incremental_rho_update", c->diarization.incremental_rho_update);
   GET_BOOL("asr.enabled", c->asr.enabled);
   GET_STRING("asr.model_path", c->asr.model_path);

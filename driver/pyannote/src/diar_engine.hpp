@@ -103,6 +103,11 @@ struct Part { std::size_t begin, end; int cluster; };
 struct IncrementalParams {
     bool use_plda = false;     // false: raw 256-D cosine; true: PLDA 128-D
     float delta_new = 0.5f;    // new-speaker cosine-distance threshold
+    float delta_min = 0.75f;   // a local speaker only opens a NEW global
+                               // cluster when its nearest running centroid is
+                               // also farther than this (voice-evidence gate:
+                               // same-voice drift sits at 0.5-0.6 while a
+                               // genuinely different voice lands >= 0.85)
     float rho_update = 0.4f;   // centroid-update / new-speaker gate (activation ratio)
     float tau_active = 0.6f;   // local-speaker active gate (hard masks: >0 frames)
     int max_speakers = 20;

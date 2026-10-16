@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 
@@ -658,6 +660,14 @@ void DiarEngine::ClusterIncremental(std::vector<float>& embs,
         }
 
         int assign[3] = {-1, -1, -1};
+        static const bool kDbgInc = std::getenv("DIAR_DBG") != nullptr;
+        char dbgbuf[256];
+        if (kDbgInc) {
+            double rho[3] = {0, 0, 0};
+            for (int s = 0; s < 3; ++s) rho[s] = act_frames[s] / 589.0;
+            std::snprintf(dbgbuf, sizeof dbgbuf,
+                          "[inc-dbg] win c=%d act=%.2f/%.2f/%.2f", c, rho[0], rho[1], rho[2]);
+        } else dbgbuf[0] = 0;
         if (inc_fc_.empty()) {
             for (int s : al) {
                 int g = (int)inc_fc_.size();
@@ -666,8 +676,12 @@ void DiarEngine::ClusterIncremental(std::vector<float>& embs,
                 inc_fc_.push_back(std::vector<double>(f, f + PD));
                 inc_rc_.push_back(std::vector<double>(e, e + D));
                 assign[s] = g;
+                if (kDbgInc)
+                    std::fprintf(stderr, "%s trk%d FIRST->g%d\n", dbgbuf, s, g);
             }
         } else {
+            double near_d[3] = {1e30, 1e30, 1e30};
+            int near_g[3] = {-1, -1, -1};
             for (int s : al) {
                 const double* f = feats.data() + (size_t)(c * 3 + s) * PD;
                 int bg = -1;
@@ -677,17 +691,25 @@ void DiarEngine::ClusterIncremental(std::vector<float>& embs,
                     if (d < bd) { bd = d; bg = g; }
                 }
                 if (bg >= 0 && bd <= p.delta_new) assign[s] = bg;
+                near_d[s] = bd; near_g[s] = bg;
+                if (kDbgInc)
+                    std::fprintf(stderr, "%s trk%d near g%d d=%.3f %s\n", dbgbuf, s, bg, bd,
+                                 assign[s] >= 0 ? "MATCH" : "NEW?");
             }
             for (int s : al) {
                 if (assign[s] >= 0) continue;
                 bool is_long = std::find(ll.begin(), ll.end(), s) != ll.end();
-                if ((int)inc_fc_.size() < p.max_speakers && is_long) {
+                if ((int)inc_fc_.size() < p.max_speakers && is_long &&
+                    near_d[s] > p.delta_min) {
                     int g = (int)inc_fc_.size();
                     const double* f = feats.data() + (size_t)(c * 3 + s) * PD;
                     const float* e = embs.data() + (size_t)(c * 3 + s) * D;
                     inc_fc_.push_back(std::vector<double>(f, f + PD));
                     inc_rc_.push_back(std::vector<double>(e, e + D));
                     assign[s] = g;
+                    if (kDbgInc)
+                        std::fprintf(stderr, "%s trk%d LONG->new g%d (d=%.3f>%.2f)\n",
+                                     dbgbuf, s, g, near_d[s], p.delta_min);
                 } else if (!inc_fc_.empty()) {
                     const double* f = feats.data() + (size_t)(c * 3 + s) * PD;
                     int bg = 0;
@@ -697,6 +719,11 @@ void DiarEngine::ClusterIncremental(std::vector<float>& embs,
                         if (d < bd) { bd = d; bg = g; }
                     }
                     assign[s] = bg;
+                    if (kDbgInc)
+                        std::fprintf(stderr, "%s trk%d %s g%d d=%.3f\n",
+                                     dbgbuf, s,
+                                     is_long ? "DRIFT->absorb" : "SHORT->absorb",
+                                     bg, bd);
                 }
             }
             for (int s : ll) {

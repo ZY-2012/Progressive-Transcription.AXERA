@@ -1633,6 +1633,8 @@ void AddAssignArgs(std::vector<std::string>* args,
     if (config.incremental_plda) args->push_back("--incremental-plda");
     args->push_back("--delta-new");
     args->push_back(std::to_string(config.incremental_delta_new));
+    args->push_back("--delta-min");
+    args->push_back(std::to_string(config.incremental_delta_min));
     args->push_back("--rho-update");
     args->push_back(std::to_string(config.incremental_rho_update));
   }
@@ -2112,6 +2114,7 @@ class ResultWorker {
       if (c_.diarization.incremental)
         std::cerr << " incremental(delta_new="
                   << c_.diarization.incremental_delta_new
+                  << ",delta_min=" << c_.diarization.incremental_delta_min
                   << ",rho_update=" << c_.diarization.incremental_rho_update
                   << (c_.diarization.incremental_plda ? ",plda" : ",raw")
                   << ")";
@@ -2345,8 +2348,12 @@ class ResultWorker {
           c_.diarization.session_max_wait_sec <= 0.0f) {
         std::cerr << "[diar] session timeline wait timed out for " << wav
                   << "; released " << released.size() << " parts early\n";
-        if (released.empty()) return false;
-        // Partial coverage: finish with the best mapping available.
+        // Partial coverage: finish with the best mapping available.  Even
+        // with nothing released incrementally the timeline's parts are the
+        // authoritative labels; falling back to whole-segment diarization
+        // here would discard correct per-part speakers (e.g. a new speaker
+        // whose parts merged into a single unreleased part).  The caller's
+        // per-segment fallback still applies when no part maps at all.
         for (const auto& p : parts) release(p.begin, p.end, p.speaker_id);
         break;
       }

@@ -190,6 +190,12 @@ struct AppConfig {
     // New-speaker cosine-distance gate: a local speaker becomes a new global
     // speaker only when its nearest running centroid is farther than this.
     float incremental_delta_new = 0.5f;
+    // Second (voice-evidence) gate for opening a new global speaker: the
+    // nearest running centroid must also be farther than this distance.
+    // Same-voice embedding drift lands at 0.5-0.65 while a genuinely new
+    // voice lands >= 0.85, so a value between the two blocks spurious
+    // speaker spawns (e.g. drift tracks) without delaying real ones.
+    float incremental_delta_min = 0.75f;
     // Centroid-update / new-speaker gate: a local speaker must be active for
     // at least this fraction of a sub-window to create or update a centroid.
     float incremental_rho_update = 0.4f;
